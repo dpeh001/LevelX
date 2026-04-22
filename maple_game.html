@@ -921,8 +921,17 @@ const GAME_VERSION = 'v0.11.1';
 document.getElementById('version-tag').textContent = GAME_VERSION;
 
 const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
+// Rendering context is `let` (not const) so drawMonster can temporarily swap
+// it to an offscreen buffer while compositing the cel-shaded lighting pass.
+let ctx = canvas.getContext('2d');
 const W = canvas.width, H = canvas.height;
+
+// Offscreen buffer used by drawMonster for the cel-shaded lighting pass.
+// Sized to fit the largest normal enemy; grown on demand inside drawMonster.
+const MONSTER_BUF = document.createElement('canvas');
+MONSTER_BUF.width = 256;
+MONSTER_BUF.height = 256;
+const MONSTER_BUF_CTX = MONSTER_BUF.getContext('2d');
 
 const game = {
   camera: { x: 0, y: 0 },
@@ -11799,15 +11808,82 @@ function _drawCuteFaceOverlay(sx, sy) {
   ctx.restore();
 }
 
+// Types drawn as solid silhouettes — these get the cel-shading pass.
+// Bosses (aetherion, gravitos) and FX-heavy mobs (wraith, mushmom, king)
+// already have their own lighting/aura systems and bleed beyond their
+// bounding box, so they render directly.
+const CEL_SHADED_MONSTERS = new Set([
+  'snail', 'slime', 'mushroom', 'orange', 'horny',
+  'stump', 'zombie', 'mummy', 'skeleton', 'scorpion'
+]);
+
+// Paints three light tiers onto the offscreen sprite buffer using
+// source-atop so they only touch opaque pixels of the sprite itself:
+//   1. cool diagonal shadow (upper-left fully lit → lower-right shaded)
+//   2. ambient occlusion band near the feet
+//   3. warm rim light in the upper-left quadrant
+//   4. tight specular highlight additive
+// Light direction is fixed in world space (upper-left) so it reads as a
+// consistent sun across all enemies, independent of facing.
+function applyCelShading(bctx, mw, mh, padLeft, padTop) {
+  const x0 = padLeft, y0 = padTop;
+  bctx.save();
+  bctx.globalCompositeOperation = 'source-atop';
+
+  // 1. Diagonal shadow tier
+  const sg = bctx.createLinearGradient(x0, y0, x0 + mw, y0 + mh);
+  sg.addColorStop(0.00, 'rgba(20, 24, 60, 0)');
+  sg.addColorStop(0.40, 'rgba(20, 24, 60, 0)');
+  sg.addColorStop(0.62, 'rgba(20, 24, 60, 0.18)');
+  sg.addColorStop(1.00, 'rgba(12, 14, 40, 0.34)');
+  bctx.fillStyle = sg;
+  bctx.fillRect(x0, y0, mw, mh);
+
+  // 2. Ambient occlusion near the ground (bottom 35% of sprite)
+  const aoTop = y0 + mh * 0.65;
+  const ao = bctx.createLinearGradient(0, aoTop, 0, y0 + mh);
+  ao.addColorStop(0, 'rgba(0, 0, 20, 0)');
+  ao.addColorStop(1, 'rgba(0, 0, 20, 0.32)');
+  bctx.fillStyle = ao;
+  bctx.fillRect(x0, aoTop, mw, mh - (aoTop - y0));
+
+  // 3. Warm rim/key light in upper-left
+  const lx = x0 + mw * 0.30, ly = y0 + mh * 0.22;
+  const lr = Math.max(mw, mh) * 0.70;
+  const rim = bctx.createRadialGradient(lx, ly, 1, lx, ly, lr);
+  rim.addColorStop(0.00, 'rgba(255, 246, 220, 0.38)');
+  rim.addColorStop(0.45, 'rgba(255, 236, 190, 0.12)');
+  rim.addColorStop(1.00, 'rgba(255, 236, 190, 0)');
+  bctx.fillStyle = rim;
+  bctx.fillRect(x0, y0, mw, mh);
+
+  // 4. Tight specular speck — additive for a crisp cel-shade highlight
+  bctx.globalCompositeOperation = 'lighter';
+  const sx2 = x0 + mw * 0.28, sy2 = y0 + mh * 0.18;
+  const spec = bctx.createRadialGradient(sx2, sy2, 0, sx2, sy2, mw * 0.28);
+  spec.addColorStop(0.0, 'rgba(255, 255, 255, 0.55)');
+  spec.addColorStop(0.4, 'rgba(255, 255, 255, 0.15)');
+  spec.addColorStop(1.0, 'rgba(255, 255, 255, 0)');
+  bctx.fillStyle = spec;
+  bctx.fillRect(x0, y0, mw, mh);
+
+  bctx.restore();
+}
+
 function drawMonster(m) {
   const sx = m.x - game.camera.x;
   const sy = m.y;
   if (sx + m.w < 0 || sx > W) return;
 
-  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  // Softer, slightly wider ground shadow (blurred blob) — reads more grounded
+  // than the old hard-edged ellipse.
+  ctx.save();
+  ctx.filter = 'blur(2px)';
+  ctx.fillStyle = 'rgba(0,0,0,0.30)';
   ctx.beginPath();
-  ctx.ellipse(sx + m.w/2, m.y + m.h, m.w/2, 4, 0, 0, Math.PI * 2);
+  ctx.ellipse(sx + m.w/2, m.y + m.h, m.w/2 + 2, 4.5, 0, 0, Math.PI * 2);
   ctx.fill();
+  ctx.restore();
 
   // Death Mark visual (floating skull)
   if (m.deathMark > 0) {
@@ -11880,27 +11956,68 @@ function drawMonster(m) {
   }
 
   const flashOn = m.hitFlash > 0 && Math.floor(m.hitFlash / 30) % 2 === 0;
-  ctx.save();
-  if (flashOn) ctx.filter = 'brightness(2.5)';
 
-  if (m.type === 'snail') drawSnail(m, sx, sy);
-  else if (m.type === 'slime') drawSlime(m, sx, sy);
-  else if (m.type === 'mushroom' || m.type === 'orange') drawMushroom(m, sx, sy);
-  else if (m.type === 'horny') drawHorny(m, sx, sy);
-  else if (m.type === 'stump') drawStump(m, sx, sy);
-  else if (m.type === 'zombie') drawZombie(m, sx, sy);
-  else if (m.type === 'mummy')    drawMummy(m, sx, sy);
-  else if (m.type === 'skeleton') drawSkeletonMob(m, sx, sy);
-  else if (m.type === 'wraith')   drawWraith(m, sx, sy);
-  else if (m.type === 'scorpion') drawScorpion(m, sx, sy);
-  else if (m.type === 'king') drawKingSlime(m, sx, sy);
-  else if (m.type === 'mushmom') drawMushmom(m, sx, sy);
-  else if (m.type === 'aetherion') drawAetherion(m, sx, sy);
-  else if (m.type === 'gravitos') drawGravitos(m, sx, sy);
+  const drawSpriteDirect = () => {
+    if (m.type === 'snail') drawSnail(m, sx, sy);
+    else if (m.type === 'slime') drawSlime(m, sx, sy);
+    else if (m.type === 'mushroom' || m.type === 'orange') drawMushroom(m, sx, sy);
+    else if (m.type === 'horny') drawHorny(m, sx, sy);
+    else if (m.type === 'stump') drawStump(m, sx, sy);
+    else if (m.type === 'zombie') drawZombie(m, sx, sy);
+    else if (m.type === 'mummy')    drawMummy(m, sx, sy);
+    else if (m.type === 'skeleton') drawSkeletonMob(m, sx, sy);
+    else if (m.type === 'wraith')   drawWraith(m, sx, sy);
+    else if (m.type === 'scorpion') drawScorpion(m, sx, sy);
+    else if (m.type === 'king') drawKingSlime(m, sx, sy);
+    else if (m.type === 'mushmom') drawMushmom(m, sx, sy);
+    else if (m.type === 'aetherion') drawAetherion(m, sx, sy);
+    else if (m.type === 'gravitos') drawGravitos(m, sx, sy);
+  };
 
-  // Burn effect
+  if (CEL_SHADED_MONSTERS.has(m.type)) {
+    // Render the sprite to an offscreen buffer, paint cel-shade tiers
+    // clipped to the sprite silhouette (source-atop), then blit back.
+    const padX = 16, padTop = 24, padBottom = 8;
+    const bufW = m.w + padX * 2;
+    const bufH = m.h + padTop + padBottom;
+    if (MONSTER_BUF.width < bufW)  MONSTER_BUF.width  = Math.max(256, bufW);
+    if (MONSTER_BUF.height < bufH) MONSTER_BUF.height = Math.max(256, bufH);
+    MONSTER_BUF_CTX.clearRect(0, 0, MONSTER_BUF.width, MONSTER_BUF.height);
+
+    // Translate offscreen so the sprite lands at (padX, padTop) while the
+    // per-type draw functions keep using their world (sx, sy) coordinates.
+    MONSTER_BUF_CTX.save();
+    MONSTER_BUF_CTX.translate(padX - sx, padTop - sy);
+
+    const realCtx = ctx;
+    ctx = MONSTER_BUF_CTX;
+    try {
+      drawSpriteDirect();
+    } finally {
+      ctx = realCtx;
+    }
+    MONSTER_BUF_CTX.restore();
+
+    applyCelShading(MONSTER_BUF_CTX, m.w, m.h, padX, padTop);
+
+    ctx.save();
+    if (flashOn) ctx.filter = 'brightness(2.5)';
+    ctx.drawImage(
+      MONSTER_BUF,
+      0, 0, bufW, bufH,
+      sx - padX, sy - padTop, bufW, bufH
+    );
+    ctx.restore();
+  } else {
+    // Complex mobs keep their bespoke lighting; just pass the hit flash.
+    ctx.save();
+    if (flashOn) ctx.filter = 'brightness(2.5)';
+    drawSpriteDirect();
+    ctx.restore();
+  }
+
+  // Burn effect — drawn on top, never filtered
   if (m.burnTimer > 0) {
-    ctx.filter = 'none';
     for (let i = 0; i < 2; i++) {
       ctx.fillStyle = `rgba(255, ${100 + Math.random()*80}, 0, 0.7)`;
       const fx = sx + Math.random() * m.w;
@@ -11910,8 +12027,6 @@ function drawMonster(m) {
       ctx.fill();
     }
   }
-
-  ctx.restore();
 
   // HP bar
   if (m.currentHp < m.maxHp) {
