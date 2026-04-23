@@ -11817,54 +11817,57 @@ const CEL_SHADED_MONSTERS = new Set([
   'stump', 'zombie', 'mummy', 'skeleton', 'scorpion'
 ]);
 
-// Paints three light tiers onto the offscreen sprite buffer using
-// source-atop so they only touch opaque pixels of the sprite itself:
-//   1. cool diagonal shadow (upper-left fully lit → lower-right shaded)
-//   2. ambient occlusion band near the feet
-//   3. warm rim light in the upper-left quadrant
-//   4. tight specular highlight additive
-// Light direction is fixed in world space (upper-left) so it reads as a
-// consistent sun across all enemies, independent of facing.
+// Cute-style 2-shade cel shading. Clipped to the sprite silhouette via
+// source-atop, so the tiers only land on opaque pixels.
+//   1. single flat shadow tone on the lower-right half (hard diagonal edge)
+//   2. single flat lit tone on the upper-left half (hard diagonal edge)
+//   3. additive rim-dot on the sun-facing shoulder
+//   4. soft pink cheek blush for a plush-toy feel
+// Light direction is fixed in world space (upper-left) so every enemy
+// reads under the same sun regardless of facing.
 function applyCelShading(bctx, mw, mh, padLeft, padTop) {
   const x0 = padLeft, y0 = padTop;
   bctx.save();
   bctx.globalCompositeOperation = 'source-atop';
 
-  // 1. Diagonal shadow tier
-  const sg = bctx.createLinearGradient(x0, y0, x0 + mw, y0 + mh);
-  sg.addColorStop(0.00, 'rgba(20, 24, 60, 0)');
-  sg.addColorStop(0.40, 'rgba(20, 24, 60, 0)');
-  sg.addColorStop(0.62, 'rgba(20, 24, 60, 0.18)');
-  sg.addColorStop(1.00, 'rgba(12, 14, 40, 0.34)');
-  bctx.fillStyle = sg;
+  // 1. Shadow tier — razor-thin transition fakes a hard cel-shade edge.
+  const shadow = bctx.createLinearGradient(x0, y0, x0 + mw, y0 + mh);
+  shadow.addColorStop(0.00, 'rgba(36, 28, 78, 0)');
+  shadow.addColorStop(0.53, 'rgba(36, 28, 78, 0)');
+  shadow.addColorStop(0.57, 'rgba(28, 22, 66, 0.34)');
+  shadow.addColorStop(1.00, 'rgba(28, 22, 66, 0.34)');
+  bctx.fillStyle = shadow;
   bctx.fillRect(x0, y0, mw, mh);
 
-  // 2. Ambient occlusion near the ground (bottom 35% of sprite)
-  const aoTop = y0 + mh * 0.65;
-  const ao = bctx.createLinearGradient(0, aoTop, 0, y0 + mh);
-  ao.addColorStop(0, 'rgba(0, 0, 20, 0)');
-  ao.addColorStop(1, 'rgba(0, 0, 20, 0.32)');
-  bctx.fillStyle = ao;
-  bctx.fillRect(x0, aoTop, mw, mh - (aoTop - y0));
-
-  // 3. Warm rim/key light in upper-left
-  const lx = x0 + mw * 0.30, ly = y0 + mh * 0.22;
-  const lr = Math.max(mw, mh) * 0.70;
-  const rim = bctx.createRadialGradient(lx, ly, 1, lx, ly, lr);
-  rim.addColorStop(0.00, 'rgba(255, 246, 220, 0.38)');
-  rim.addColorStop(0.45, 'rgba(255, 236, 190, 0.12)');
-  rim.addColorStop(1.00, 'rgba(255, 236, 190, 0)');
-  bctx.fillStyle = rim;
+  // 2. Lit tier — matching hard edge on the opposite diagonal, warm tint
+  //    so the sprite reads as two discrete tones.
+  const lit = bctx.createLinearGradient(x0, y0, x0 + mw, y0 + mh);
+  lit.addColorStop(0.00, 'rgba(255, 246, 214, 0.22)');
+  lit.addColorStop(0.43, 'rgba(255, 246, 214, 0.22)');
+  lit.addColorStop(0.47, 'rgba(255, 246, 214, 0)');
+  lit.addColorStop(1.00, 'rgba(255, 246, 214, 0)');
+  bctx.fillStyle = lit;
   bctx.fillRect(x0, y0, mw, mh);
 
-  // 4. Tight specular speck — additive for a crisp cel-shade highlight
+  // 3. Crisp specular dot — additive for the sun-facing shoulder.
   bctx.globalCompositeOperation = 'lighter';
   const sx2 = x0 + mw * 0.28, sy2 = y0 + mh * 0.18;
-  const spec = bctx.createRadialGradient(sx2, sy2, 0, sx2, sy2, mw * 0.28);
-  spec.addColorStop(0.0, 'rgba(255, 255, 255, 0.55)');
-  spec.addColorStop(0.4, 'rgba(255, 255, 255, 0.15)');
-  spec.addColorStop(1.0, 'rgba(255, 255, 255, 0)');
+  const spec = bctx.createRadialGradient(sx2, sy2, 0, sx2, sy2, mw * 0.22);
+  spec.addColorStop(0.00, 'rgba(255, 255, 255, 0.60)');
+  spec.addColorStop(0.55, 'rgba(255, 255, 255, 0.12)');
+  spec.addColorStop(1.00, 'rgba(255, 255, 255, 0)');
   bctx.fillStyle = spec;
+  bctx.fillRect(x0, y0, mw, mh);
+
+  // 4. Cheek blush — soft pink patch on the shaded side, clipped to
+  //    silhouette via source-atop for that plush-toy cuteness.
+  bctx.globalCompositeOperation = 'source-atop';
+  const bx = x0 + mw * 0.70, by = y0 + mh * 0.62;
+  const blush = bctx.createRadialGradient(bx, by, 0, bx, by, mw * 0.22);
+  blush.addColorStop(0.00, 'rgba(255, 150, 180, 0.28)');
+  blush.addColorStop(0.70, 'rgba(255, 150, 180, 0.08)');
+  blush.addColorStop(1.00, 'rgba(255, 150, 180, 0)');
+  bctx.fillStyle = blush;
   bctx.fillRect(x0, y0, mw, mh);
 
   bctx.restore();
